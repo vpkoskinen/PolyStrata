@@ -30,6 +30,8 @@ void bf16_to_f32(const uint16_t* w, float* out, size_t n, void* stream);
 /// rows) may be null.  A row of y starts y_stride values after the one before it (0: n), so two calls can fill
 /// the two halves of rows twice as long.
 void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride = 0);
+/// The threads of a block that sums over n values (rms_norm()'s among them).
+int sum_threads(int n);
 /// y = (x - mean) / sqrt(var + eps) * w + b.
 void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream);
 
@@ -185,13 +187,20 @@ struct Kvq8 {
 /// window - 1 + rows of them.
 /// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
 /// which must be no fewer than a launch's tokens attend between them, and score has room for them.
+/// score_floats: the floats score holds, when more than the above.  Heads of 64 values in groups of 4 over the
+/// whole conversation then take a launch block each block of rows, where score has room for those blocks' sums
+/// of chunk tokens at the longest the call can attend (attend_split_floats()); the results differ from the other
+/// kernels' in the last bits.
 /// With `kq8` or `vq8` (codes not null) that cache is read as Q8_0 rather than fp16: its codes/scale pointers
 /// follow the same row and head index the fp16 cache would, and a block of 32 values dequantizes as
 /// `(float)codes[..] * __half2float(scales[..])`.  The fp16 path is unchanged where they are left null.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
-            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0, Kvq8 kq8 = {},
-            Kvq8 vq8 = {});
+            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0, size_t score_floats = 0,
+            Kvq8 kq8 = {}, Kvq8 vq8 = {});
+/// The floats of score that attend()'s blocks of rows take for calls of up to chunk tokens attending up to max_rows
+/// rows (score_floats): with that much a model's every call takes them.
+size_t attend_split_floats(int chunk, int n_head, int max_rows, int dim);
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so
@@ -200,6 +209,8 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 /// scores and weights, 6 bytes for each of a token's n_head heads, in the score_floats floats of `score`, which
 /// must hold 2 * n_head floats.  work: rows * n_head * (dim + dim / 2 + 3) + 1 floats.  Throws
 /// std::runtime_error.
+/// Heads of 64 values in groups of 4 over the whole conversation take one kernel instead, which keeps the scores in
+/// registers, on NVIDIA cards from Turing on; it uses neither blas, score nor work.
 /// With `kq8` or `vq8` (codes not null) that cache is read as Q8_0 like attend(): before each block of `m` keys
 /// the product reads, its rows are dequantized into the fp16 workspace `kwork` / `vwork`, and the products then
 /// read that exactly as they read an fp16 cache, so the results match attend()'s q8 read.  Each workspace holds
@@ -228,6 +239,12 @@ void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool
 /// the tokens' order, `stride` floats apart.
 void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
                 float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+/// LFM2's gated short convolution (llama.cpp's shortconv block between its two projections).  bcx: B, C and x of a
+/// token, `channels` values each, as the in_proj writes them.  out = C * conv3(B * x), `channels` values a token,
+/// a causal convolution of three taps w (3, channels).  state: the 2 B * x before the call a channel, oldest
+/// first, advanced here by `rows` tokens.  snap, stride, snaps: as conv4_silu's.
+void shortconv(const float* bcx, float* state, const float* w, float* out, int channels, int rows, void* stream,
+               float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
 /// The delta-rule step of every value head and its gated output, token after token: ggml's gated_delta_net op
 /// with one decay a head.  qkv: a token's conv outputs, the k_heads key heads' q, their k, then the n_head value
 /// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their

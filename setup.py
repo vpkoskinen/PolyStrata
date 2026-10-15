@@ -83,6 +83,8 @@ HF_REVISIONS = {
     "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP": "bbe9e566f39e4fc9652ac66b71968289a03c520a",        # 2026-09-10
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
     "unsloth/DeepSeek-V4-Flash-0731-GGUF": "fbbb5b93fb787c21338159b0af3318bb3f4d9768",               # 2026-10-15
+    "unsloth/LFM2.5-24B-A2B-GGUF": "faa77113e93335b63423e9e8d33395f86eaf8946",                        # 2026-10-15
+    "LiquidAI/LFM2.5-24B-A2B-GGUF": "0912d33141f77e10705345a6732bfd83f0252fdc",                       # 2026-10-15
 }
 
 
@@ -512,12 +514,47 @@ FAMILIES = {
     # less, and the third is by name (poly_default()).  "windows": installed by setup and run there, on one PC.
     # "ran_on_gb": the smallest card it has run on, 32 GB without the key.  "tail_skip": the engine's --tail-skip,
     # for the family whose answers it moves no more than the Strata project's default moves its own (docs/BACKENDS.md).
+    # "laptop_tps": tokens/s written after a prompt that fills each context on the 8 GB laptop, where the family's
+    # differ from the others'.
+    # "batch_gb": the VRAM the engine's prompt batch takes for a second 1,024 tokens, measured on the RTX 5090; a card
+    # that holds every expert beside it reads with 2,048 (poly_batch()).  "batch_from_gb": the family reads with 2,048
+    # on any card from this much VRAM (GiB) on, where the 8 GB laptop read faster that way and wrote no slower.
+    # LFM2.5 (llama.cpp's lfm2moe): no draft block and no image encoder.  QAD-Q4_0 is Liquid AI's own file, trained
+    # for that quantization; the other sizes are Unsloth's.
+    "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; quantized by Unsloth and Liquid AI",
+              "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a 15 GB file, ~20 GB of RAM "
+                       "beside an 8 GB card; four other sizes too, no images",
+              "hf": hf("unsloth/LFM2.5-24B-A2B-GGUF"), "file": "LFM2.5-24B-A2B-{q}.gguf", "shards": 1,
+              "tag": "lfm25-", "name": "lfm2.5-24b-a2b", "engine": "poly", "vision": False, "experimental": True,
+              "windows": True, "ran_on_gb": 8, "row_bytes": 20480, "batch_gb": 0.4, "batch_from_gb": 7.5,
+              "laptop_tps": {32768: "69-74", 65536: "54-55", 131072: "35-37"},
+              "models": {"UD-Q4_K_XL": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                        "download_gb": 14.9, "ram_gb": 20, "arena_gb": 14.0, "vram_beside_gb": 4.1},
+                         "UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write: the least RAM",
+                                        "download_gb": 10.9, "ram_gb": 16, "arena_gb": 10.2, "vram_beside_gb": 3.9},
+                         "QAD-Q4_0": {"about": "Liquid AI's 4-bit file, trained for that quantization",
+                                      "download_gb": 13.6, "ram_gb": 18, "arena_gb": 12.9, "vram_beside_gb": 3.8,
+                                      "hf": hf("LiquidAI/LFM2.5-24B-A2B-GGUF")},
+                         "UD-Q6_K_XL": {"about": "6-bit experts, 8-bit where they write",
+                                        "download_gb": 21.9, "ram_gb": 27, "arena_gb": 20.9, "vram_beside_gb": 4.4},
+                         "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
+                                  "download_gb": 25.5, "ram_gb": 31, "arena_gb": 24.4, "vram_beside_gb": 4.5}},
+              "sha256": {"LFM2.5-24B-A2B-UD-Q4_K_XL.gguf":
+                         (14876901632, "a235d23638cc5549cb1ff61da7522c8a7e97f056f27093462a1e56f35aba91d8"),
+                         "LFM2.5-24B-A2B-UD-Q3_K_XL.gguf":
+                         (10947100928, "d54834c785c7e265f1cb7375e47aa6f55a0b7cfab75816254c4d2e0c82fd5efc"),
+                         "LFM2.5-24B-A2B-QAD-Q4_0.gguf":
+                         (13578190880, "d1c03f73ecaf61017d70419eec9e5dc0b05d50ae26c23d522829b934fbabf8a5"),
+                         "LFM2.5-24B-A2B-UD-Q6_K_XL.gguf":
+                         (21861204224, "abcb7e21e006eb4c826a2b75fb91c0804db7b20f908a61beeebdbdd07c88f41d"),
+                         "LFM2.5-24B-A2B-Q8_0.gguf":
+                         (25493733344, "97cd912b01124793a69ddebc309abbbad7ebb38ac2fb9c2bc55dfc1ad9d1809e")}},
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
                "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a 17 GB file, ~21 GB of RAM "
                         "beside an 8 GB card; a smaller and a larger size too",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
                "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": True, "experimental": True,
-               "windows": True, "ran_on_gb": 8, "tail_skip": 6,
+               "windows": True, "ran_on_gb": 8, "tail_skip": 6, "batch_gb": 0.5,
                "row_bytes": 26624, "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
@@ -5744,6 +5781,20 @@ def poly_held_gb(d, vram_gb) -> float:
     return min(d["arena_gb"], max(0.0, vram_gb - poly_beside_gb(d)) * 1.073741824)
 
 
+def poly_batch(fam, d, vram_gb, ctx) -> bool:
+    """Whether setup's config reads a prompt 2,048 tokens at a time instead of the engine's 1,024: on a card that holds
+    every expert of a size beside the larger batch and the context's rows past 32K, with a GiB to spare, llama.cpp's
+    matrix kernels get twice the rows of each expert and a long prompt is read 14% (Qwen3.6) to 30% (LFM2.5) faster;
+    on a smaller card the experts outside VRAM are copied to it half as often.  A family without "batch_gb" keeps
+    1,024, one with "batch_from_gb" takes 2,048 on any card from that size on."""
+    if fam.get("batch_from_gb") and vram_gb >= fam["batch_from_gb"]:
+        return True
+    if not fam.get("batch_gb"):
+        return False
+    rows = max(0, ctx - 32768) * fam.get("row_bytes", GLM_ROW_BYTES) / 2**30
+    return d["arena_gb"] <= poly_held_gb(d, vram_gb - fam["batch_gb"] - rows - 1)
+
+
 def poly_default(sizes, ram, vram_gb) -> str:
     """The size setup takes when none is named: the first whose RAM estimate this PC meets, else the one that wants
     the least."""
@@ -6059,7 +6110,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if hip and WIN:
         fail(f"{title} has no AMD engine for Windows: its HIP engine is compiled on Linux",
              "choose another model for this card, or run setup on Linux")
-    if hip and family in ("glm", "deepseek", "gemma4", "tiel"):   # the engine runs on the AMD card, these models not yet
+    if hip and family in ("glm", "deepseek", "lfm25", "gemma4", "tiel"):   # the engine runs on AMD, these models not yet
         warn(f"{title} on the AMD card has not been tried: the engine runs there, this model was not")
     if cuda_tk == 12:
         warn(f"{title}'s engine with CUDA 12 is compiled here (the ready-made one is CUDA 13)" +
@@ -6160,8 +6211,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
         say("  Longer takes VRAM from the expert cache:")
         row = fam.get("row_bytes", GLM_ROW_BYTES)
-        # writing after a prompt that fills the context, tokens/s, on the 8 GB laptop (docs/BACKENDS.md)
-        laptop = {32768: "52-58", 65536: "42-46", 131072: "28-30"} if fam.get("ran_on_gb") == 8 else {}
+        # writing after a prompt that fills the context, tokens/s, on the 8 GB laptop (docs/BACKENDS.md, docs/LFM.md)
+        laptop = fam.get("laptop_tps") or ({32768: "52-58", 65536: "42-46", 131072: "28-30"}
+                                           if fam.get("ran_on_gb") == 8 else {})
         for i, c in enumerate(POLY_CONTEXTS, 1):
             on8 = f"; 8 GB card: {laptop[c]} tokens/s after a full prompt" if c in laptop else ""
             note = f"   (recommended{on8})" if c == 32768 else \
@@ -6300,6 +6352,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
            "that much less)")
     if fam.get("tail_skip"):
         args += ["--tail-skip", str(fam["tail_skip"])]
+    if not multi and poly_batch(fam, d, vram, ctx):
+        args += ["--prompt-batch", "2048"]
+        ok("prompts are read 2,048 tokens at a time (--prompt-batch in the config)")
     # The engine's own count is every logical CPU.  On a hybrid CPU that is the slowest: an efficiency core runs
     # an expert at half the speed, and a layer waits for its slowest part (hybrid_pool_workers()).
     cores = cpu_cores()
@@ -6627,7 +6682,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=list(FAMILIES) + list(PREVIEW_FAMILIES),
                     help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md), deepseek = "
-                         "DeepSeek V4 Flash, qwen36 = Qwen3.6-35B-A3B on strata-poly, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel "
+                         "DeepSeek V4 Flash, lfm25 = LFM2.5-24B-A2B, qwen36 = Qwen3.6-35B-A3B on strata-poly, ornith = "
+                         "Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel "
                          "Coder 35B-A3B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
                          "own engine (UD-Q4_K_XL and up, 32 GB of RAM or more)")
     ap.add_argument("--model", choices=list(dict.fromkeys(

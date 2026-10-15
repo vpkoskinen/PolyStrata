@@ -19,6 +19,7 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 10.5 to 16.9 GB | its draft model, a file of 0.46 GB |
 | Tiel Coder 35B-A3B | `qwen35moe` | `strata-poly` | peculiar-ragdoll's UD-Q3_K_XL, UD-IQ3_XXS and UD-Q4_K_XL, 13.6 to 22.7 GB | draft block in the file |
 | DeepSeek V4 Flash | `deepseek4` | `strata-poly` | Unsloth UD-IQ2_XXS, three files, 90.9 GB | repeats only: its draft model is not run yet |
+| LFM2.5-24B-A2B | `lfm2moe` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL, UD-Q6_K_XL and Q8_0, Liquid AI QAD-Q4_0, 10.9 to 25.5 GB | repeats only: there is no draft model |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
 GGUF in place, and it now has four architectures. It was called `strata-glm`, after its first model; an install
@@ -180,6 +181,8 @@ key, so a model the engine cannot run is listed as unavailable with the reason i
 | `glm5-next`, `glm5next` | `Glm5Next` |
 | `qwen35moe` | `Qwen35` |
 | `gemma4` | `Gemma4` |
+| `deepseek4` | `DeepSeek4` |
+| `lfm2moe` | `Lfm2Moe` |
 
 Within an architecture the shape comes from the file: layer counts, widths, head counts, expert counts, which
 layers have which attention, whether there is a draft block. Qwen3.6 and Ornith 1.5 are one class because their
@@ -193,6 +196,8 @@ and, by the tokenizer's `pre` name, how the model writes its reasoning and its t
 | Qwen3.8, Qwen3.6, Ornith | the prompt opens it, `</think>` ends it | `<tool_call><function=NAME><parameter=P>...` |
 | GLM | the same | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...` |
 | Gemma 4 | `<\|channel>thought` to `<channel\|>`, opened by the model | `<\|tool_call>call:NAME{key:value,...}<tool_call\|>` |
+| DeepSeek V4 | the prompt opens it, `</think>` ends it | `<｜DSML｜invoke name="NAME"><｜DSML｜parameter name="K" string="true">V...` |
+| LFM2.5 | the prompt opens it, `</think>` ends it | `<\|tool_call_start\|>[NAME(K='V', ...), NAME2()]<\|tool_call_end\|>` |
 
 Gemma 4's template thinks only when it is told to, reads a tool in OpenAI's shape and starts with the tokenizer's
 `<bos>`; the server gives it all three. A tool's answers are put in the order of their calls for every model,
@@ -525,7 +530,8 @@ from hand-written configs, as for the last table below.
 | DeepSeek V4 Flash UD-IQ2_XXS | 32 GB | 29,750 | 28.7 to 28.8 | 1,038 to 1,040 | 56 | 39 to 44 | 73% |
 
 DeepSeek V4 Flash's row is of 2026-10-15, as setup installs the model, with the build that added it
-([DEEPSEEK.md](DEEPSEEK.md)).
+([DEEPSEEK.md](DEEPSEEK.md)). LFM2.5-24B-A2B's five sizes ran the same test on this machine and on the laptop
+below; their tables are in [LFM.md](LFM.md#how-fast).
 
 Tiel Coder's three sizes ran again that day with the same build, whose prompt batches route on the card and skip
 cuBLAS for small products. The documents had grown to 32,165 tokens. UD-Q3_K_XL read them at 8,083 to 8,114
@@ -535,6 +541,24 @@ the prompt at 222 to 229, 216 to 218 and 216 to 220. The README has the higher n
 chat's answer came out a few tokens different and its guesses were right less often with UD-Q3_K_XL and UD-Q4_K_XL;
 with guessing off a token took the same time in both builds, 243 to 244 tokens/s with UD-Q3_K_XL. The files of the
 other three models were no longer on the machine.
+
+They were downloaded again for the nine sizes of Qwen3.6, Ornith and Gemma 4, which ran on 2026-10-15 with that
+build (c566ff47), each size in turns with the engine of the release before (c8a07742), three runs of each and the
+last two below. The documents came to 31,986 tokens, 31,201 for Gemma 4. The engine before read them at 5,679 to
+6,432 tokens/s with Qwen3.6 and Ornith, the first token after 5.0 to 5.7 s, and at 7,224 to 7,823 with Gemma 4 (4.0
+to 4.4 s), and wrote at about the same speeds as this build. The README has the higher numbers of each cell.
+
+| Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 31,986 | 4.2 | 7,802 to 7,810 | 376 to 378 | 235 to 238 | 100% |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 31,986 | 4.2 | 7,724 to 7,737 | 436 to 442 | 261 to 262 | 100% |
+| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 31,986 | 4.0 | 8,069 to 8,079 | 395 to 396 | 248 | 100% |
+| Ornith 1.5 APEX-I-Compact | whole model on it | 31,986 | 4.0 | 8,038 to 8,106 | 315 to 316 | 204 to 205 | 100% |
+| Ornith 1.5 APEX-I-Mini | whole model on it | 31,986 | 4.2 | 7,712 to 7,737 | 286 to 302 | 204 to 205 | 100% |
+| Ornith 1.5 APEX-I-Quality | whole model on it | 31,986 | 4.1 | 7,858 to 7,879 | 297 to 302 | 197 to 203 | 100% |
+| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,201 | 3.7 to 3.8 | 8,420 to 8,478 | 346 | 258 to 263 | 100% |
+| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,201 | 4.0 | 7,941 to 7,968 | 332 to 338 | 248 to 252 | 100% |
+| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,201 | 3.8 | 8,321 to 8,392 | 338 to 342 | 231 to 237 | 100% |
 
 The build before that change, three hours earlier:
 

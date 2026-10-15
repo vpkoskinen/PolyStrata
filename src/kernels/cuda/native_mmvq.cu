@@ -29,6 +29,7 @@
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "s26_tsum.cuh"
+#include "slots.cuh"
 #if !defined(__HIPCC__)
 #include "q8_1_il.cuh"
 #endif
@@ -189,6 +190,46 @@ __global__ void native_swiglu_quantize_q8_1_kernel(const float* __restrict__ gat
     const int8_t q = q8_1_quant(xi, d, amax);
     y[i / Q8K].qs[i % Q8K] = q;
     if (i % Q8K == 0) y[i / Q8K].ds = q8_1_ds(d, sum);
+}
+
+// native_add_rms_norm_q8_1: a block a row.  The sum of squares, the scale and the product are poly's rms_norm_kernel
+// with its block size (SUM threads of the block) and its IEEE operations written out (this file is built with
+// --use_fast_math).  Then every thread of the block takes values, a warp 32 of one Q8_1 block, and quantizes them as
+// native_quantize_q8_1_kernel does: more threads than the sum's make the row's quantization fewer steps.
+template<int SUM>
+__launch_bounds__(1024, 1)
+__global__ void native_add_rms_norm_q8_1_kernel(float* __restrict__ x, const float* __restrict__ add,
+                                                const float* __restrict__ w, float* __restrict__ y,
+                                                Q81Block* __restrict__ yq, int n, float eps) {
+    __shared__ float part[SUM / WARP];
+    float* xr = x + std::size_t(blockIdx.x) * n;
+    const float* ar = add ? add + std::size_t(blockIdx.x) * n : nullptr;
+    float* yr = y + std::size_t(blockIdx.x) * n;
+    Q81Block* qr = yq + std::size_t(blockIdx.x) * (n / Q8K);
+    if (threadIdx.x < SUM) {
+        float ss = 0.0f;
+        for (int i = threadIdx.x; i < n; i += SUM) {
+            float v = xr[i];
+            if (ar) xr[i] = v = __fadd_rn(v, ar[i]);
+            ss = __fmaf_rn(v, v, ss);
+        }
+        ss = warp_sum(ss);
+        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = ss;
+    }
+    __syncthreads();
+    float sum = 0.0f;
+    for (int k = 0; k < SUM / WARP; ++k) sum = __fadd_rn(sum, part[k]);
+    const float scale = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(sum, float(n)), eps)));
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {   // n is a multiple of 32: a warp's 32 values are one block
+        const float xi = __fmul_rn(__fmul_rn(xr[i], scale), w[i]);
+        yr[i] = xi;
+        const float amax = warp_max(fabsf(xi));
+        const float bsum = warp_sum(xi);
+        const float d = q8_1_finite(amax / 127.0f);
+        const int8_t q = q8_1_quant(xi, d, amax);
+        qr[i / Q8K].qs[i % Q8K] = q;
+        if (i % Q8K == 0) qr[i / Q8K].ds = q8_1_ds(d, bsum);
+    }
 }
 
 // Exact pinned vec_dot_q5_K_q8_1_impl_vmmq expression and integer dot order.
@@ -1431,14 +1472,15 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
     }
 }
 
-// Several matrices of one format and shape in one launch (native_mmvq_slots): blockIdx.y is the matrix, and the
-// rest is native_mmvq_multi_kernel for one column in its EXACT layout.
-template<typename F, int ROWS>
+// Several matrices of one format and shape in one launch (native_mmvq_slots, native_mmvq_ids): blockIdx.y is the
+// matrix, and the rest is native_mmvq_multi_kernel for one column in its EXACT layout.
+template<typename F, int ROWS, typename S>
 __launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
-__global__ void native_mmvq_slots_kernel(MmvqSlots slots, int n_in, int n_out) {
-    const auto* w = static_cast<const typename F::Block*>(slots.w[blockIdx.y]);
-    const auto* x = static_cast<const Q81Block*>(slots.x[blockIdx.y]);
-    float* y = slots.y[blockIdx.y];
+__global__ void native_mmvq_slots_kernel(S slots, int n_in, int n_out) {
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const auto* w = static_cast<const typename F::Block*>(at.w);
+    const auto* x = static_cast<const Q81Block*>(at.x);
+    float* y = at.y;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
     const int row0 = ROWS * int(blockIdx.x);
     const int blocks_per_row = n_in / F::DIV;
@@ -1470,15 +1512,15 @@ __global__ void native_mmvq_slots_kernel(MmvqSlots slots, int n_in, int n_out) {
     }
 }
 
-template<typename F>
-void launch_slots(const MmvqSlots& slots, int count, int n_in, int n_out, cudaStream_t s) {
+template<typename F, typename S>
+void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s) {
     const dim3 threads(WARP, WARPS);
     if (n_in / F::DIV < F::BPI) {
         constexpr int ROWS = 2;
         const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));
-        native_mmvq_slots_kernel<F, ROWS><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        native_mmvq_slots_kernel<F, ROWS, S><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
     } else {
-        native_mmvq_slots_kernel<F, 1><<<dim3(unsigned(n_out), unsigned(count)), threads, 0, s>>>(slots, n_in, n_out);
+        native_mmvq_slots_kernel<F, 1, S><<<dim3(unsigned(n_out), unsigned(count)), threads, 0, s>>>(slots, n_in, n_out);
     }
 }
 
@@ -2317,6 +2359,28 @@ void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_
     launch_check();
 }
 
+void native_add_rms_norm_q8_1(float* x, const float* add, const float* w, float* y, void* y_q8_1, int n, int rows,
+                              float eps, int threads, void* stream) {
+    validate_shape(n, 1);
+    validate_pointer(x);
+    validate_pointer(w);
+    validate_pointer(y);
+    validate_pointer(y_q8_1);
+    validate_stream(stream);
+    if (rows < 1) return;
+    const auto s = static_cast<cudaStream_t>(stream);
+    auto* q = static_cast<Q81Block*>(y_q8_1);
+    const int block = std::max(threads, std::min(1024, n));   // n is a multiple of 32, and so is this
+    switch (threads) {
+    case 128: native_add_rms_norm_q8_1_kernel<128><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 256: native_add_rms_norm_q8_1_kernel<256><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 512: native_add_rms_norm_q8_1_kernel<512><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 1024: native_add_rms_norm_q8_1_kernel<1024><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    default: throw std::invalid_argument("native_add_rms_norm_q8_1: 128, 256, 512 or 1024 threads");
+    }
+    launch_check();
+}
+
 void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, QK);
@@ -2718,30 +2782,31 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
     }
 }
 
-bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+namespace {
+
+// The formats a slots launch has a kernel for: 1 this file's, 2 iq_kernels.cu's, 0 none.
+int slots_kind(int ggml_type) {
 #if defined(STRATA_HIP_GFX906)
-    (void) ggml_type, (void) slots, (void) count, (void) n_in, (void) n_out, (void) stream;
-    return false;   // the wave layout has no kernel for it
+    (void) ggml_type;
+    return 0;   // the wave layout has no kernel for it
 #else
-    const bool small = ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 20;
-    const bool k = ggml_type == 10 || ggml_type == 11 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 ||
-                   ggml_type == 23;
-    // the formats native_mmvq() hands to iq_mmvq()
-    const bool iq = ggml_type == 7 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 || ggml_type == 21 ||
-                    ggml_type == 22 || ggml_type == 29;
-    if (!small && !k && !iq && ggml_type != 42) return false;
-    validate_shape(n_in, 1, small || ggml_type == 7 ? 32 : ggml_type == 42 ? 64 : 256);
-    if (n_out <= 0 || count < 1 || count > MAX_NCOLS)
-        throw std::invalid_argument("native MMVQ requires n_out > 0 and 1 to 8 matrices");
-    for (int i = 0; i < count; ++i) {
-        validate_pointer(slots.w[i]);
-        validate_pointer(slots.x[i]);
-        validate_pointer(slots.y[i]);
+    switch (ggml_type) {
+    case 2: case 6: case 8: case 20: case 10: case 11: case 12: case 13: case 14: case 23: case 42: return 1;
+    case 7: case 16: case 17: case 18: case 21: case 22: case 29: return 2;   // the ones native_mmvq() hands to iq_mmvq()
+    default: return 0;
     }
+#endif
+}
+
+template<typename S>
+void launch_slots_of(int ggml_type, const S& slots, int count, int n_in, int n_out, void* stream) {
+    const bool small = ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 20;
+    validate_shape(n_in, 1, small || ggml_type == 7 ? 32 : ggml_type == 42 ? 64 : 256);
     validate_stream(stream);
-    if (iq) {
-        iq_mmvq_slots(ggml_type, slots, count, n_in, n_out, stream);
-        return true;
+    if (slots_kind(ggml_type) == 2) {
+        if constexpr (std::is_same_v<S, MmvqSlots>) iq_mmvq_slots(ggml_type, slots, count, n_in, n_out, stream);
+        else iq_mmvq_ids(ggml_type, slots, count, n_in, n_out, stream);
+        return;
     }
     const auto s = static_cast<cudaStream_t>(stream);
     switch (ggml_type) {
@@ -2758,8 +2823,35 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
     default: launch_slots<Q20Traits>(slots, count, n_in, n_out, s); break;
     }
     launch_check();
+}
+
+}  // namespace
+
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+    if (!slots_kind(ggml_type)) return false;
+    if (n_out <= 0 || count < 1 || count > MAX_NCOLS)
+        throw std::invalid_argument("native MMVQ requires n_out > 0 and 1 to 8 matrices");
+    for (int i = 0; i < count; ++i) {
+        validate_pointer(slots.w[i]);
+        validate_pointer(slots.x[i]);
+        validate_pointer(slots.y[i]);
+    }
+    launch_slots_of(ggml_type, slots, count, n_in, n_out, stream);
     return true;
-#endif
+}
+
+bool native_mmvq_ids_supported(int ggml_type) { return slots_kind(ggml_type) != 0; }
+
+bool native_mmvq_ids(int ggml_type, const MmvqIds& ids, int count, int n_in, int n_out, void* stream) {
+    if (!slots_kind(ggml_type)) return false;
+    if (n_out <= 0 || count < 1 || count > 65535 || ids.x_every < 1)
+        throw std::invalid_argument("native_mmvq_ids requires n_out > 0, 1 to 65535 matrices and x_every > 0");
+    validate_pointer(ids.table);
+    validate_pointer(ids.ids);
+    validate_pointer(ids.x);
+    validate_pointer(ids.y);
+    launch_slots_of(ggml_type, ids, count, n_in, n_out, stream);
+    return true;
 }
 
 #if !defined(__HIPCC__)
