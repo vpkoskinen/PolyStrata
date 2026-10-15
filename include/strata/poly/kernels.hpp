@@ -62,6 +62,12 @@ void kda_step(float* qkv, float* g1, const float* a, const float* beta, float* s
 void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream);
 /// The same from the row the card holds at `at` when the launch runs; with `ring`, a row is its number % ring.
 void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream);
+/// Stores the tokens' rows as ggml Q8_0 (one fp16 scale a 32-value block of int8 codes) from row `pos`.
+/// codes: n int8 a row; scales: n/32 fp16 a row.  n must be a multiple of 32 (QK8_0).
+void store_q8(const float* x, int8_t* codes, uint16_t* scales, int n, int64_t pos, int rows, void* stream);
+/// The same from the row the card holds at `at` when the launch runs; with `ring`, a row is its number % ring.
+void store_q8_at(const float* x, int8_t* codes, uint16_t* scales, int n, const long long* at, int rows, int ring,
+                 void* stream);
 /// Attention over cached latents for the tokens from position `pos`.  q: n_head * rank absorbed queries a token.
 /// The first dense_rows tokens attend to every cache row up to their own.  The others each have a list in sel
 /// (sel_stride apart): top_rows cache rows, then the rows of the pool their own position is still filling.
@@ -147,6 +153,15 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
                     float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr,
                     const int32_t* axes = nullptr, int sections = 1, const long long* at = nullptr);
+/// An attention cache stored as ggml Q8_0: a row is `n` int8 codes and `n / 32` fp16 scales with
+/// `n = kv_heads * dim`, row-major (`codes[row * n + blk * 32 + j]`, `scales[row * (n / 32) + blk]`).
+/// A q8 read is active wherever `codes` is not null.  The value a block holds is
+/// `(float)codes[..] * __half2float(scales[..])` with one scale a 32-value block.
+struct Kvq8 {
+    const int8_t* codes = nullptr;
+    const uint16_t* scales = nullptr;
+};
+
 /// Causal attention for the tokens from position `pos`: token t attends the rows 0 to pos + t, or with `window`
 /// only the last `window` of them.  q: n_head * dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the
 /// heads read a row's keys and values in turn, n_head / kv_heads heads each.  With `ring`, the sequence's row p
@@ -159,9 +174,13 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 /// window - 1 + rows of them.
 /// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
 /// which must be no fewer than a launch's tokens attend between them, and score has room for them.
+/// With `kq8` or `vq8` (codes not null) that cache is read as Q8_0 rather than fp16: its codes/scale pointers
+/// follow the same row and head index the fp16 cache would, and a block of 32 values dequantizes as
+/// `(float)codes[..] * __half2float(scales[..])`.  The fp16 path is unchanged where they are left null.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
-            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);
+            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0, Kvq8 kq8 = {},
+            Kvq8 vq8 = {});
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so
@@ -170,9 +189,15 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 /// scores and weights, 6 bytes for each of a token's n_head heads, in the score_floats floats of `score`, which
 /// must hold 2 * n_head floats.  work: rows * n_head * (dim + dim / 2 + 3) + 1 floats.  Throws
 /// std::runtime_error.
+/// With `kq8` or `vq8` (codes not null) that cache is read as Q8_0 like attend(): before each block of `m` keys
+/// the product reads, its rows are dequantized into the fp16 workspace `kwork` / `vwork`, and the products then
+/// read that exactly as they read an fp16 cache, so the results match attend()'s q8 read.  Each workspace holds
+/// work_halves halves, `work_halves / (kv_heads * dim)` rows at most: a block of keys larger than that is split,
+/// taking more products.  The fp16 path (both null) is unchanged and reads the caches where they lie.
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
-                  float scale, void* stream, int window = 0, int ring = 0, bool whole = false);
+                  float scale, void* stream, int window = 0, int ring = 0, bool whole = false, Kvq8 kq8 = {},
+                  Kvq8 vq8 = {}, uint16_t* kwork = nullptr, uint16_t* vwork = nullptr, size_t work_halves = 0);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// The first of the largest of n logits and the softmax's probability of it, summed without the logits more than
